@@ -21,10 +21,10 @@ const connection = mysql.createConnection({
 })
 
 function authenticateToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
+    const authHeader = req.headers['authorization' ];
     const token = authHeader && authHeader.split(' ')[1];
 
-    if (token == null) return res.status(401).json({ status: 'forbidden', message: 'No token provided.' });
+    if (token == null) return res.status(401).json({ status: 'forbidden', message: 'No token provided.'  });
 
     jwt.verify(token, secret, (err, user) => {
         if (err) return res.status(403).json({ status: 'forbidden', message: 'Failed to authenticate token.' });
@@ -123,9 +123,10 @@ app.get('/findAllBooking', (req, res) => {
 });
 
 app.get('/bookingDetail', authenticateToken, (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(400).json({ status: 'error', message: 'User ID not found in token' });
-    }
+
+    // if (!req.user || !req.user.id) {
+    //     return res.status(400).json({ status: 'error', message: 'User ID not found in token' });
+    // }
     connection.execute(`
             SELECT 
                 users.fname AS Username, 
@@ -144,8 +145,8 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
             JOIN 
                 rooms ON bookings.roomId = rooms.roomId
             WHERE 
-                users.id = ?`,
-            [req.user.id],
+                users.email = ?`,
+                [req.user.email],
             function (err, results, fields) {
                 if (err) { res.json({ status: 'error', message: err }); return }
                 if (results.length == 0) { res.json({ status: 'error', message: 'user not found' }); return }
@@ -167,8 +168,8 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
          )
 })
 
-app.post('/book-room', (req, res) => {
-    const { userId, roomId, checkIn, checkOut } = req.body;
+app.post('/booking', authenticateToken ,(req, res) => {
+    const { roomId, checkIn, checkOut } = req.body;
 
     const sql = 'INSERT INTO bookings (userId, roomId, checkIn, checkOut) VALUES (?, ?, ?, ?)';
     connection.query(sql, [userId, roomId, checkIn, checkOut], (err, result) => {
