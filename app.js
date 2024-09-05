@@ -24,14 +24,19 @@ function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization' ];
     const token = authHeader && authHeader.split(' ')[1];
 
+
     if (token == null) return res.status(401).json({ status: 'forbidden', message: 'No token provided.'  });
 
     jwt.verify(token, secret, (err, user) => {
         if (err) return res.status(403).json({ status: 'forbidden', message: 'Failed to authenticate token.' });
         console.log('Decoded token',user)
-        req.user = user;
+
+
+        
+        req.user = { userId: user.userId, email: user.email }; 
         next();
     });
+    
 }
 
 app.post('/register', jsonParser, function (req, res, next) {
@@ -59,7 +64,7 @@ app.post('/login', jsonParser, function (req, res, next) {
             if (users.length == 0) { res.json({ status: 'error', message: 'no user found' }); return }
             bcrypt.compare(req.body.password, users[0].password, function (err, isLogin) {
                 if (isLogin) {
-                    const accessToken = jwt.sign({ email: users[0].email }, secret, { expiresIn: '1h' });
+                    const accessToken = jwt.sign({  userId: users[0].userId,email: users[0].email }, secret, { expiresIn: '1h' });
                     res.json({ status: 'ok', message: ' login success', accessToken: accessToken })
                 } else {
                     res.json({ status: 'error', message: ' login failed' })
@@ -81,14 +86,14 @@ app.post('/authen', jsonParser, function (req, res, next) {
 
 app.get('/profile', authenticateToken, (req, res) => {
     connection.execute(
-        'SELECT id, fname, lname, email, image FROM users WHERE email = ?',
+        'SELECT userId, fname, lname, email, image FROM users WHERE email = ?',
         [req.user.email],
         function (err, users, fields) {
             if (err) { res.json({ status: 'error', message: err }); return }
             if (users.length == 0) { res.json({ status: 'error', message: 'user not found' }); return }
 
             const user = {
-                id: users[0].id,
+                id: users[0].userId,
                 fname: users[0].fname,
                 lname: users[0].lname,
                 email: users[0].email,
@@ -109,7 +114,7 @@ app.get('/findAllBooking', (req, res) => {
         FROM 
             bookings
         JOIN 
-            users ON bookings.userId = users.id
+            users ON bookings.userId = users.userId
         JOIN 
             rooms ON bookings.roomId = rooms.roomId
         ORDER BY 
@@ -124,9 +129,9 @@ app.get('/findAllBooking', (req, res) => {
 
 app.get('/bookingDetail', authenticateToken, (req, res) => {
 
-    // if (!req.user || !req.user.id) {
-    //     return res.status(400).json({ status: 'error', message: 'User ID not found in token' });
-    // }
+    if (!req.user || !req.user.email) {
+        return res.status(400).json({ status: 'error', message: 'User ID not found in token' });
+    }
     connection.execute(`
             SELECT 
                 users.fname AS Username, 
@@ -141,7 +146,7 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
             FROM 
                 bookings
             JOIN 
-                users ON bookings.userId = users.id
+                users ON bookings.userId = users.userId
             JOIN 
                 rooms ON bookings.roomId = rooms.roomId
             WHERE 
@@ -170,17 +175,18 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
 
 app.post('/booking', authenticateToken ,(req, res) => {
     const { roomId, checkIn, checkOut } = req.body;
+    const userId = req.user.userId;
 
     const sql = 'INSERT INTO bookings (userId, roomId, checkIn, checkOut) VALUES (?, ?, ?, ?)';
-    connection.query(sql, [userId, roomId, checkIn, checkOut], (err, result) => {
-        if (!userId || !roomId || !checkIn || !checkOut) {
+    connection.query(sql, [ userId, roomId, checkIn, checkOut], (err, result) => {
+        if (!roomId || !checkIn || !checkOut) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
         if (err) {
             console.error('Error inserting data:', err);
             res.status(500).json({ error: 'Failed to book room' });
         } else {
-            res.status(200).json({ message: 'Room booked successfully' });
+            res.status(200).json({ status: 'ok', message: 'Room booked successfully' });
         }
     });
 });
