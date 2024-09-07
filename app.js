@@ -49,7 +49,7 @@ app.post('/register', jsonParser, function (req, res, next) {
                     res.json({ status: 'error', message: err })
                     return
                 }
-                res.json({ status: 'ok' })
+                res.json({ status: 'ok', message: 'Register successfully' })
             }
         )
     });
@@ -133,16 +133,14 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
         return res.status(400).json({ status: 'error', message: 'User ID not found in token' });
     }
     connection.execute(`
-            SELECT 
-                users.fname AS Username, 
+            SELECT  
+                bookings.bookingNumber,
                 rooms.roomId AS NumberOfRooms,
                 rooms.roomName,
                 rooms.roomType,
-                rooms.roomPrice,
-                rooms.roomArea,
                 bookings.checkIn,
                 bookings.checkOut,
-                rooms.roomImage
+                bookings.payment
             FROM 
                 bookings
             JOIN 
@@ -156,29 +154,39 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
                 if (err) { res.json({ status: 'error', message: err }); return }
                 if (results.length == 0) { res.json({ status: 'error', message: 'user not found' }); return }
 
-                const booking = {
-                    Username: results[0].Username,
-                    NumberOfRooms: results[0].NumberOfRooms,
-                    roomName: results[0].roomName,
-                    roomType: results[0].roomType,
-                    roomPrice: results[0].roomPrice,
-                    roomArea: results[0].roomArea,
-                    checkIn: results[0].checkIn,
-                    checkOut: results[0].checkOut,
-                    roomImage: results[0].roomImage ? Buffer.from(results[0].roomImage).toString('base64') : null
-                };
-
-                res.json({ status: 'ok', booking})
+                const booking = results.map(result => ({
+                    bookingNumber: result.bookingNumber,
+                    NumberOfRooms: result.NumberOfRooms,
+                    roomName: result.roomName,
+                    roomType: result.roomType,
+                    checkIn: result.checkIn,
+                    checkOut: result.checkOut,
+                    payment: result.payment
+                }));
+    
+                res.json({ status: 'ok', booking });
             }
          )
 })
 
+const crypto = require('crypto');
+
+function generateRandomString(length) {
+    const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const bytes = crypto.randomBytes(length);
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += charset[bytes[i] % charset.length];
+    }
+    return result;
+}
 app.post('/booking', authenticateToken ,(req, res) => {
     const { roomId, checkIn, checkOut } = req.body;
     const userId = req.user.userId;
+    const bookingNumber = generateRandomString(8);
 
-    const sql = 'INSERT INTO bookings (userId, roomId, checkIn, checkOut) VALUES (?, ?, ?, ?)';
-    connection.query(sql, [ userId, roomId, checkIn, checkOut], (err, result) => {
+    const sql = 'INSERT INTO bookings (bookingNumber, userId, roomId, checkIn, checkOut) VALUES (?, ?, ?, ?, ?)';
+    connection.query(sql, [ bookingNumber,userId, roomId, checkIn, checkOut], (err, result) => {
         if (!roomId || !checkIn || !checkOut) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
@@ -191,53 +199,30 @@ app.post('/booking', authenticateToken ,(req, res) => {
     });
 });
 
+app.post('/checkEmail', jsonParser, (req, res) => {
+    const email = req.body.email;  // ใช้ req.body สำหรับ POST requests
+
+    if (!email) {
+        return res.status(400).json({ status: 'error', message: 'Email parameter is required.' });
+    }
+
+    const sql = 'SELECT * FROM users WHERE email = ?';
+    connection.query(sql, [email], (err, results) => {
+        if (err) {
+            console.error('Database query error:', err);
+            return res.status(500).json({ status: 'error', message: 'Database query failed.' });
+        }
+        
+        if (results.length > 0) {
+            return res.json({ exists: true });  // If email is found
+        } else {
+            return res.json({ exists: false });  // If email is not found
+        }
+    });
+});
+
+
 app.listen(3333, function () {
     console.log('CORS-enabled web server listening on port 3333')
 })
 
-// app.get('/userDetail', (req, res) => {
-//     const token = req.headers.authorization?.split(' ')[1];
-//     if (!token) {
-//         return res.status(403).send('No token provided');
-//     }
-
-//     // ตรวจสอบและถอดรหัส token
-//     jwt.verify(token, secret, (err, decoded) => {
-//         if (err) {
-//             return res.status(403).send('Failed to authenticate token');
-//         }
-
-//         const userId = decoded.id;
-//         console.log('Decoded userId:', userId);
-
-//         const sql = `
-//             SELECT
-//                 users.fname AS Username,
-//                 rooms.roomId AS NumberOfRooms,
-//                 rooms.roomName,
-//                 rooms.roomType,
-//                 rooms.roomPrice,
-//                 rooms.roomArea,
-//                 bookings.checkIn,
-//                 bookings.checkOut,
-//                 rooms.roomImage
-//             FROM
-//                 bookings
-//             JOIN
-//                 users ON bookings.userId = users.id
-//             JOIN
-//                 rooms ON bookings.roomId = rooms.roomId
-//             WHERE
-//                 users.id = ?
-//         `;
-
-//         connection.query(sql, [userId], (err, results) => {
-//             if (err) {
-//                 console.error(err);
-//                 res.status(500).send('Server Error');
-//                 return;
-//             }
-//             res.json(results);  // ส่งผลลัพธ์กลับในรูปแบบ JSON
-//         });
-//     });  // ปิดการเรียกใช้ jwt.verify
-// }); 
