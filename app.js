@@ -21,29 +21,29 @@ const connection = mysql.createConnection({
 })
 
 function authenticateToken(req, res, next) {
-    const authHeader = req.headers['authorization' ];
+    const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
 
-    if (token == null) return res.status(401).json({ status: 'forbidden', message: 'No token provided.'  });
+    if (token == null) return res.status(401).json({ status: 'forbidden', message: 'No token provided.' });
 
     jwt.verify(token, secret, (err, user) => {
-        if (err) return res.status(403).json({ status: 'forbidden', message: 'Failed to authenticate token.' });
-        console.log('Decoded token',user)
+        if (err) return res.status(403).json({ status: 'forbidden', message: 'Please login' });
+        console.log('Decoded token', user)
 
 
-        
-        req.user = { userId: user.userId, email: user.email }; 
+
+        req.user = { userId: user.userId, email: user.email };
         next();
     });
-    
+
 }
 
 app.post('/register', jsonParser, function (req, res, next) {
     bcrypt.hash(req.body.password, saltRounds, function (err, hash) {
         connection.execute(
-            'INSERT INTO users (email, password , fname , lname) VALUES (?,?,?,?)',
-            [req.body.email, hash, req.body.fname, req.body.lname],
+            'INSERT INTO users (email, password , fname , lname , phoneNumber ) VALUES (?,?,?,?,?)',
+            [req.body.email, hash, req.body.fname, req.body.lname, req.body.phoneNumber],
             function (err, results, fields) {
                 if (err) {
                     res.json({ status: 'error', message: err })
@@ -64,7 +64,7 @@ app.post('/login', jsonParser, function (req, res, next) {
             if (users.length == 0) { res.json({ status: 'error', message: 'no user found' }); return }
             bcrypt.compare(req.body.password, users[0].password, function (err, isLogin) {
                 if (isLogin) {
-                    const accessToken = jwt.sign({  userId: users[0].userId,email: users[0].email }, secret, { expiresIn: '1h' });
+                    const accessToken = jwt.sign({ userId: users[0].userId, email: users[0].email }, secret, { expiresIn: '1h' });
                     res.json({ status: 'ok', message: ' login success', accessToken: accessToken })
                 } else {
                     res.json({ status: 'error', message: ' login failed' })
@@ -149,55 +149,176 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
                 rooms ON bookings.roomId = rooms.roomId
             WHERE 
                 users.email = ?`,
-                [req.user.email],
-            function (err, results, fields) {
-                if (err) { res.json({ status: 'error', message: err }); return }
-                if (results.length == 0) { res.json({ status: 'error', message: 'user not found' }); return }
+        [req.user.email],
+        function (err, results, fields) {
+            if (err) { res.json({ status: 'error', message: err }); return }
+            if (results.length == 0) { res.json({ status: 'error', message: 'user not found' }); return }
 
-                const booking = results.map(result => ({
-                    bookingNumber: result.bookingNumber,
-                    NumberOfRooms: result.NumberOfRooms,
-                    roomName: result.roomName,
-                    roomType: result.roomType,
-                    checkIn: result.checkIn,
-                    checkOut: result.checkOut,
-                    payment: result.payment
-                }));
-    
-                res.json({ status: 'ok', booking });
-            }
-         )
+            const booking = results.map(result => ({
+                bookingNumber: result.bookingNumber,
+                NumberOfRooms: result.NumberOfRooms,
+                roomName: result.roomName,
+                roomType: result.roomType,
+                checkIn: result.checkIn,
+                checkOut: result.checkOut,
+                payment: result.payment
+            }));
+
+            res.json({ status: 'ok', booking });
+        }
+    )
 })
 
 const crypto = require('crypto');
 
-function generateRandomString(length) {
+function generateRandomBookingNumber(length) {
     const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    const bytes = crypto.randomBytes(length);
-    let result = '';
-    for (let i = 0; i < length; i++) {
-        result += charset[bytes[i] % charset.length];
+    const fixedPrefix = 'BBB';  // กำหนดค่าตัวอักษรที่ต้องการให้เป็น 3 ตัวหน้า
+    let result = fixedPrefix;
+
+    // ตรวจสอบความยาวที่เหลือ
+    const remainingLength = length - fixedPrefix.length;
+
+    // สร้างตัวอักษรสุ่มสำหรับส่วนที่เหลือ
+    for (let i = 0; i < remainingLength; i++) {
+        const randomIndex = Math.floor(Math.random() * charset.length);
+        result += charset[randomIndex];
     }
+
     return result;
 }
-app.post('/booking', authenticateToken ,(req, res) => {
-    const { roomId, checkIn, checkOut } = req.body;
-    const userId = req.user.userId;
-    const bookingNumber = generateRandomString(8);
-
-    const sql = 'INSERT INTO bookings (bookingNumber, userId, roomId, checkIn, checkOut) VALUES (?, ?, ?, ?, ?)';
-    connection.query(sql, [ bookingNumber,userId, roomId, checkIn, checkOut], (err, result) => {
-        if (!roomId || !checkIn || !checkOut) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
+// ฟังก์ชันลบ booking ที่ยังมีสถานะเป็น pending และผ่านเวลาเกิน 10 นาที
+function removePendingBooking(userId, roomId, callback) {
+    const tenMinutesAgo = new Date(Date.now() - 1 * 60 * 1000);  // เวลาปัจจุบันลบด้วย 10 นาที
+    const sql = 'DELETE FROM bookings WHERE userId = ? AND roomId = ? AND bookingStatus = "pending" AND createdAt < ?';
+    
+    connection.query(sql, [userId, roomId, tenMinutesAgo], (err, result) => {
         if (err) {
-            console.error('Error inserting data:', err);
-            res.status(500).json({ error: 'Failed to book room' });
-        } else {
-            res.status(200).json({ status: 'ok', message: 'Room booked successfully' });
+            console.error('Error deleting pending booking:', err);
+            return callback(err);
         }
+        if (result.affectedRows > 0) {
+            console.log(`Pending booking for user ${userId} in room ${roomId} has been deleted due to exceeding 10 minutes.`);
+        }
+        callback(null);  // ส่ง callback กลับไปเพื่อบอกว่าเสร็จสิ้น
+    });
+}
+app.post('/booking', authenticateToken, (req, res) => {
+    const { roomId, checkIn, checkOut, adultsCount, childrenCount } = req.body;
+    const userId = req.user.userId;
+    const bookingNumber = generateRandomBookingNumber(8);
+
+    if (!roomId || !checkIn || !checkOut || !adultsCount || !childrenCount) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const checkInDate = new Date(checkIn);
+    const checkOutDate = new Date(checkOut);
+
+    if (checkOutDate < checkInDate) {
+        return res.status(400).json({ error: 'Check-out date cannot be before check-in date' });
+    }
+
+    const isSameDay = checkInDate.toDateString() === checkOutDate.toDateString();
+    
+    if (isSameDay) {
+        return res.status(400).json({ error: 'Check-out date cannot be the same as check-in date' });
+    }
+
+    const duration = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
+
+    // ตรวจสอบว่ามีการจองห้องในช่วงวันที่นี้หรือไม่
+    const checkAvailabilitySql = `
+        SELECT * FROM bookings 
+        WHERE roomId = ? 
+        AND bookingStatus != "cancelled"
+        AND ((checkIn <= ? AND checkOut >= ?) OR (checkIn <= ? AND checkOut >= ?))
+    `;
+    
+    connection.query(checkAvailabilitySql, [roomId, checkOutDate, checkInDate, checkInDate, checkOutDate], (err, result) => {
+        if (err) {
+            console.error('Error checking room availability:', err);
+            return res.status(500).json({ error: 'Failed to check room availability' });
+        }
+
+        // ถ้ามีการจองในช่วงเวลาที่กำหนด จะแจ้งว่าห้องเต็ม
+        if (result.length > 0) {
+            return res.status(400).json({ error: 'Room is fully booked for the selected dates' });
+        }
+
+        // ดึง roomPrice จากตาราง rooms
+        const priceSql = 'SELECT roomPrice FROM rooms WHERE roomId = ?';
+        connection.query(priceSql, [roomId], (err, result) => {
+            if (err) {
+                console.error('Error fetching room price:', err);
+                return res.status(500).json({ error: 'Failed to fetch room price' });
+            }
+
+            if (result.length === 0) {
+                return res.status(404).json({ error: 'Room not found' });
+            }
+
+            const roomPrice = result[0].roomPrice;
+            const cost = duration * roomPrice;
+
+            // แทรกการจองใหม่
+            const bookingSql = 'INSERT INTO bookings (bookingNumber, userId, roomId, checkIn, checkOut, adultsCount, childrenCount, duration, cost, bookingStatus) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "pending")';
+            connection.query(bookingSql, [bookingNumber, userId, roomId, checkIn, checkOut, adultsCount, childrenCount, duration, cost], (err, result) => {
+                if (err) {
+                    console.error('Error inserting booking:', err);
+                    return res.status(500).json({ error: 'Failed to book room' });
+                }
+
+                res.status(200).json({ status: 'ok', message: 'Room booked successfully', bookingNumber, cost });
+
+                // ตั้งเวลา 10 นาทีเพื่อลบ booking ถ้าสถานะยังเป็น pending
+                setTimeout(() => {
+                    const deleteSql = 'DELETE FROM bookings WHERE bookingNumber = ? AND bookingStatus = "pending"';
+                    connection.query(deleteSql, [bookingNumber], (err, result) => {
+                        if (err) {
+                            console.error('Error deleting pending booking:', err);
+                        } else if (result.affectedRows > 0) {
+                            console.log(`Booking ${bookingNumber} has been deleted due to pending status for more than 10 minutes.`);
+                        }
+                    });
+                }, 10 * 60 * 1000);  // ลบหลังจาก 10 นาที (10 * 60 * 1000 milliseconds)
+            });
+        });
     });
 });
+
+
+
+
+
+
+
+
+// const dns = require('dns');
+
+// function checkEmailExists(email, callback) {
+//     const domain = email.split('@')[1];
+//     dns.resolveMx(domain, (err, addresses) => {
+//         if (err || addresses.length === 0) {
+//             callback(false);
+//         } else {
+//             callback(true);
+//         }
+//     });
+// }
+// app.post('/checkDns', jsonParser, (req, res) => {
+//     const email = req.body.email;
+//     if (!email) {
+//         return res.status(400).json({ status: 'error', message: 'Email parameter is required.' });
+//     }
+//     checkEmailExists(email, (exists) => {
+//         if (exists) {
+//             res.json({ exists: true });
+//         } else {
+//             res.json({ exists: false });
+//         }
+//     });
+// });
 
 app.post('/checkEmail', jsonParser, (req, res) => {
     const email = req.body.email;  // ใช้ req.body สำหรับ POST requests
@@ -212,7 +333,7 @@ app.post('/checkEmail', jsonParser, (req, res) => {
             console.error('Database query error:', err);
             return res.status(500).json({ status: 'error', message: 'Database query failed.' });
         }
-        
+
         if (results.length > 0) {
             return res.json({ exists: true });  // If email is found
         } else {
