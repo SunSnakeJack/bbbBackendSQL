@@ -24,20 +24,18 @@ function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
-
     if (token == null) return res.status(401).json({ status: 'forbidden', message: 'No token provided.' });
 
     jwt.verify(token, secret, (err, user) => {
         if (err) return res.status(403).json({ status: 'forbidden', message: 'Please login' });
-        console.log('Decoded token', user)
+        console.log('Decoded token', user);
 
-
-
-        req.user = { userId: user.userId, email: user.email };
+        // เพิ่ม role ลงใน req.user เพื่อให้สามารถเข้าถึงได้ภายหลัง
+        req.user = { userId: user.userId, email: user.email, role: user.role };
         next();
     });
-
 }
+
 
 app.post('/register', jsonParser, function (req, res, next) {
     bcrypt.hash(req.body.password, saltRounds, function (err, hash) {
@@ -64,15 +62,31 @@ app.post('/login', jsonParser, function (req, res, next) {
             if (users.length == 0) { res.json({ status: 'error', message: 'no user found' }); return }
             bcrypt.compare(req.body.password, users[0].password, function (err, isLogin) {
                 if (isLogin) {
-                    const accessToken = jwt.sign({ userId: users[0].userId, email: users[0].email }, secret, { expiresIn: '1h' });
-                    res.json({ status: 'ok', message: ' login success', accessToken: accessToken })
+                    // สร้าง token ที่มี userId, email และ role
+                    const accessToken = jwt.sign(
+                        { userId: users[0].userId, email: users[0].email, role: users[0].role },
+                        secret,
+                        { expiresIn: '1h' }
+                    );
+                    res.json({ status: 'ok', message: 'login success', accessToken: accessToken })
                 } else {
-                    res.json({ status: 'error', message: ' login failed' })
+                    res.json({ status: 'error', message: 'login failed' })
                 }
             });
         }
     )
-})
+});
+
+app.post('/admin-only-endpoint', authenticateToken, (req, res) => {
+    if (req.user.role !== 'administration') {
+        return res.status(403).json({ status: 'forbidden', message: 'Access denied' });
+    }
+
+    // Logic สำหรับผู้ใช้ที่มี role เป็น administration
+    res.json({ status: 'ok', message: 'Welcome, admin!' });
+});
+
+
 app.post('/authen', jsonParser, function (req, res, next) {
     try {
         var token = req.headers.authorization.split(' ')[1]
@@ -135,12 +149,16 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
     connection.execute(`
             SELECT  
                 bookings.bookingNumber,
-                rooms.roomId AS NumberOfRooms,
                 rooms.roomName,
                 rooms.roomType,
                 bookings.checkIn,
                 bookings.checkOut,
-                bookings.payment
+                bookings.Cost,
+                bookings.adultsCount,
+                bookings.childrenCount,
+                bookings.duration,
+                bookings.extraBed,
+                bookings.bookingStatus
             FROM 
                 bookings
             JOIN 
@@ -156,12 +174,16 @@ app.get('/bookingDetail', authenticateToken, (req, res) => {
 
             const booking = results.map(result => ({
                 bookingNumber: result.bookingNumber,
-                NumberOfRooms: result.NumberOfRooms,
                 roomName: result.roomName,
                 roomType: result.roomType,
                 checkIn: result.checkIn,
                 checkOut: result.checkOut,
-                payment: result.payment
+                Cost: result.Cost,
+                adultsCount: result.adultsCount,
+                childrenCount: result.childrenCount,
+                duration: result.duration,
+                extraBed: result.extraBed,
+                bookingStatus: result.bookingStatus
             }));
 
             res.json({ status: 'ok', booking });
@@ -173,38 +195,17 @@ const crypto = require('crypto');
 
 function generateRandomBookingNumber(length) {
     const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    const fixedPrefix = 'BBB';  // กำหนดค่าตัวอักษรที่ต้องการให้เป็น 3 ตัวหน้า
+    const fixedPrefix = 'BBB';
     let result = fixedPrefix;
-
-    // ตรวจสอบความยาวที่เหลือ
     const remainingLength = length - fixedPrefix.length;
-
-    // สร้างตัวอักษรสุ่มสำหรับส่วนที่เหลือ
     for (let i = 0; i < remainingLength; i++) {
         const randomIndex = Math.floor(Math.random() * charset.length);
         result += charset[randomIndex];
     }
-
     return result;
 }
-// ฟังก์ชันลบ booking ที่ยังมีสถานะเป็น pending และผ่านเวลาเกิน 10 นาที
-function removePendingBooking(userId, roomId, callback) {
-    const tenMinutesAgo = new Date(Date.now() - 1 * 60 * 1000);  // เวลาปัจจุบันลบด้วย 10 นาที
-    const sql = 'DELETE FROM bookings WHERE userId = ? AND roomId = ? AND bookingStatus = "pending" AND createdAt < ?';
-    
-    connection.query(sql, [userId, roomId, tenMinutesAgo], (err, result) => {
-        if (err) {
-            console.error('Error deleting pending booking:', err);
-            return callback(err);
-        }
-        if (result.affectedRows > 0) {
-            console.log(`Pending booking for user ${userId} in room ${roomId} has been deleted due to exceeding 10 minutes.`);
-        }
-        callback(null);  // ส่ง callback กลับไปเพื่อบอกว่าเสร็จสิ้น
-    });
-}
 app.post('/booking', authenticateToken, (req, res) => {
-    const { roomId, checkIn, checkOut, adultsCount, childrenCount } = req.body;
+    const { roomId, checkIn, checkOut, adultsCount, childrenCount, extraBed = false } = req.body;
     const userId = req.user.userId;
     const bookingNumber = generateRandomBookingNumber(8);
 
@@ -220,38 +221,34 @@ app.post('/booking', authenticateToken, (req, res) => {
     }
 
     const isSameDay = checkInDate.toDateString() === checkOutDate.toDateString();
-    
     if (isSameDay) {
         return res.status(400).json({ error: 'Check-out date cannot be the same as check-in date' });
     }
 
     const duration = Math.ceil((checkOutDate - checkInDate) / (1000 * 60 * 60 * 24));
 
-    // ตรวจสอบว่ามีการจองห้องในช่วงวันที่นี้หรือไม่
     const checkAvailabilitySql = `
         SELECT * FROM bookings 
         WHERE roomId = ? 
         AND bookingStatus != "cancelled"
         AND ((checkIn <= ? AND checkOut >= ?) OR (checkIn <= ? AND checkOut >= ?))
     `;
-    
+
     connection.query(checkAvailabilitySql, [roomId, checkOutDate, checkInDate, checkInDate, checkOutDate], (err, result) => {
         if (err) {
             console.error('Error checking room availability:', err);
             return res.status(500).json({ error: 'Failed to check room availability' });
         }
 
-        // ถ้ามีการจองในช่วงเวลาที่กำหนด จะแจ้งว่าห้องเต็ม
         if (result.length > 0) {
             return res.status(400).json({ error: 'Room is fully booked for the selected dates' });
         }
 
-        // ดึง roomPrice จากตาราง rooms
-        const priceSql = 'SELECT roomPrice FROM rooms WHERE roomId = ?';
+        const priceSql = 'SELECT roomPrice, descriptionPromotion FROM rooms WHERE roomId = ?';
         connection.query(priceSql, [roomId], (err, result) => {
             if (err) {
-                console.error('Error fetching room price:', err);
-                return res.status(500).json({ error: 'Failed to fetch room price' });
+                console.error('Error fetching room price and promotion:', err);
+                return res.status(500).json({ error: 'Failed to fetch room price and promotion' });
             }
 
             if (result.length === 0) {
@@ -259,11 +256,23 @@ app.post('/booking', authenticateToken, (req, res) => {
             }
 
             const roomPrice = result[0].roomPrice;
-            const cost = duration * roomPrice;
+            const descriptionPromotion = result[0].descriptionPromotion;
+            let discount = 0;
+            const regex = /Stay (\d+) Nights Extra Save (\d+)%/;
+            const promotionMatch = descriptionPromotion.match(regex);
 
-            // แทรกการจองใหม่
-            const bookingSql = 'INSERT INTO bookings (bookingNumber, userId, roomId, checkIn, checkOut, adultsCount, childrenCount, duration, cost, bookingStatus) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, "pending")';
-            connection.query(bookingSql, [bookingNumber, userId, roomId, checkIn, checkOut, adultsCount, childrenCount, duration, cost], (err, result) => {
+            if (promotionMatch) {
+                const requiredNights = parseInt(promotionMatch[1], 10);
+                const discountPercent = parseInt(promotionMatch[2], 10);
+                if (duration >= requiredNights) {
+                    discount = (discountPercent / 100) * (duration * roomPrice);
+                }
+            }
+
+            const cost = (duration * roomPrice) - discount;
+
+            const bookingSql = 'INSERT INTO bookings (bookingNumber, userId, roomId, checkIn, checkOut, adultsCount, childrenCount, duration, cost, extraBed, bookingStatus) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "pending")';
+            connection.query(bookingSql, [bookingNumber, userId, roomId, checkIn, checkOut, adultsCount, childrenCount, duration, cost, extraBed], (err, result) => {
                 if (err) {
                     console.error('Error inserting booking:', err);
                     return res.status(500).json({ error: 'Failed to book room' });
@@ -271,7 +280,7 @@ app.post('/booking', authenticateToken, (req, res) => {
 
                 res.status(200).json({ status: 'ok', message: 'Room booked successfully', bookingNumber, cost });
 
-                // ตั้งเวลา 10 นาทีเพื่อลบ booking ถ้าสถานะยังเป็น pending
+                // Set timeout to delete pending bookings after 10 minutes
                 setTimeout(() => {
                     const deleteSql = 'DELETE FROM bookings WHERE bookingNumber = ? AND bookingStatus = "pending"';
                     connection.query(deleteSql, [bookingNumber], (err, result) => {
@@ -279,13 +288,17 @@ app.post('/booking', authenticateToken, (req, res) => {
                             console.error('Error deleting pending booking:', err);
                         } else if (result.affectedRows > 0) {
                             console.log(`Booking ${bookingNumber} has been deleted due to pending status for more than 10 minutes.`);
+                        } else {
+                            console.log(`No booking was deleted for bookingNumber ${bookingNumber}`);
                         }
                     });
-                }, 10 * 60 * 1000);  // ลบหลังจาก 10 นาที (10 * 60 * 1000 milliseconds)
+                }, 10 * 60 * 1000); // 10 minutes
             });
         });
     });
 });
+
+
 
 
 
